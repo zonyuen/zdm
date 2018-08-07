@@ -1,0 +1,226 @@
+<?php
+
+/**
+ * @file
+ * Provides Mocean implementation methods.
+ */
+
+/**
+ * Implements hook_gateway_info().
+ */
+function mocean_gateway_info() {
+  return array(
+    'mocean' => array(
+      'name' => 'Mocean',
+      'send' => 'mocean_send',
+      'receive' => TRUE,
+      'configure form' => 'mocean_admin_form',
+      'send form' => 'mocean_send_form',
+    ),
+  );
+}
+
+/**
+ * Implements hook_menu().
+ */
+function mocean_menu() {
+  $items = array();
+  $items['admin/smsframework/gateways/mocean'] = array(
+    'title' => 'Mocean Configuration',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('mocean_admin_form'),
+    'access arguments' => array('administer moceansmsgateway'),
+    'file' => 'mocean.admin.inc',
+  );
+  $items['sms/mocean/inbound'] = array(
+    'title' => 'Mocean SMS message receiver',
+    'page callback' => 'mocean_receive_message',
+    'access arguments' => array('administer moceansmsgateway'),
+  );
+  $items['sms/mocean/receipt'] = array(
+    'title' => 'Mocean SMS receipt receiver',
+    'page callback' => 'mocean_receive_receipt',
+    'access arguments' => array('administer moceansmsgateway'),
+  );
+  return $items;
+}
+
+/**
+ * Implements hook_permission().
+ */
+function mocean_permission() {
+  return array(
+    'administer moceansmsgateway' => array(
+      'title' => t('Administer Mocean SMS Gateway'),
+      'description' => t('Mocean SMS Gateway Inbound and Receipt access'),
+      'restrict access' => TRUE,
+    ),
+  );
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter().
+ */
+function mocean_form_sms_admin_default_form_alter(&$form, &$form_state, $form_id) {
+  if (isset($form['Mocean']['id']['#markup']) && $form['Mocean']['id']['#markup'] == 'mocean') {
+    $form['Mocean']['configure']['#markup'] = l(t('configure'), 'admin/smsframework/gateways/mocean');
+  }
+}
+
+/**
+ * Implements hook_help().
+ */
+function mocean_help($path, $arg) {
+  switch ($path) {
+    case 'admin/help#mocean':
+      $output = '<h3>' . t('About') . '</h3>';
+      $output .= '<p>' . t('Mocean SMS Gateway module provides an integration between <a href="https://www.moceanapi.com" target="_blank">Mocean SMS</a> service and <a href="https://www.drupal.org/project/smsframework" target="_blank">SMS framework</a> module.') . '</p>';
+      $output .= '<h3>' . t('Uses') . '</h3>';
+      $output .= '<p>' . t('This module requires Mocean subscription. <a href="https://dashboard.moceanapi.com/register" target="_blank">Click here</a> to sign-up with Mocean.') . '</p>';
+      return $output;
+  }
+}
+
+/**
+ * Implements hook_send().
+ */
+function mocean_send($number, $message, $options = array()) {
+  $config = array();
+  $config['mocean_api_key'] = variable_get('mocean_api_key', '');
+  $config['mocean_api_secret'] = variable_get('mocean_api_secret', '');
+  $config['mocean_api_sender'] = variable_get('mocean_api_sender', '');
+  
+  /*if ($unicode_message = nexmo_unicode($message)) {
+    $message = $unicode_message;
+  }
+  else {
+    $message = rawurlencode($message);
+  }*/
+  
+  $api_key = !empty($config['mocean_api_key']) ? $config['mocean_api_key'] : '';
+  $api_secret = !empty($config['mocean_api_secret']) ? $config['mocean_api_secret'] : '';
+  $from = !empty($config['mocean_api_sender']) ? $config['mocean_api_sender'] : 'MOCEAN';
+  $query = 'mocean-api-key=' . $api_key . '&mocean-api-secret=' . $api_secret . '&mocean-from=' . $from . '&mocean-to=' . $number . '&mocean-text=' . $message . '&mocean-resp-format=JSON';
+  $api_send_url = 'https://rest.moceanapi.com/rest/1/sms';
+  $http_result = drupal_http_request($api_send_url . '?' . $query);
+  if (isset($http_result->error)) {
+    return array(
+      'status' => FALSE,
+      'message' => 'An error occurred during the HTTP request: @error', array(
+        '@error' => $http_result->error,
+      ),
+    );
+  }
+  if (isset($http_result->data)) {
+    if (strpos($http_result->data, 'ERR') !== FALSE) {
+      $result = array(
+        'status' => FALSE,
+        'message' => $http_result->data,
+      );
+    }
+    else {
+      $result = array(
+        'status' => TRUE,
+        'data' => $http_result->data,
+      );
+    }
+  }
+  return $result;
+}
+
+/**
+ * Receive an SMS message and pass it into the SMS Framework.
+ */
+function mocean_receive_message() 
+{
+  if (!isset($_REQUEST['text'], $_REQUEST['msisdn'], $_REQUEST['to'])) 
+  {
+    return FALSE;
+  }
+  else 
+  {
+    $number = $_REQUEST['msisdn'];
+    $message = $_REQUEST['text'];
+    $options = array();
+    if (array_key_exists('to', $_REQUEST) && !empty($_REQUEST['to'])) 
+	{
+      $options['receiver'] = $_REQUEST['to'];
+    }
+    if (array_key_exists('network-code', $_REQUEST) && !empty($_REQUEST['network-code'])) 
+	{
+      $options['network-code'] = $_REQUEST['network-code'];
+    }
+    if (array_key_exists('message-timestamp', $_REQUEST) && !empty($_REQUEST['message-timestamp'])) 
+	{
+      $options['message-timestamp'] = $_REQUEST['message-timestamp'];
+    }
+    if (array_key_exists('messageId', $_REQUEST) && !empty($_REQUEST['messageId'])) 
+	{
+      $options['messageId'] = $_REQUEST['messageId'];
+    }
+    sms_incoming($number, $message, $options);
+    print "response 200 OK";
+  }
+}
+
+/**
+ * Receive a message send receipt from Mocean.
+ */
+function mocean_receive_receipt() 
+{
+  $number = $_REQUEST['msisdn'];
+  $gateway_status = $_REQUEST['status'];
+  $reference = (array_key_exists('messageId', $_REQUEST)) ? $_REQUEST['messageId'] : NULL;
+  $options = array();
+  $options['reference'] = $reference;
+  if (array_key_exists('to', $_REQUEST) && !empty($_REQUEST['to'])) 
+  {
+    $options['receiver'] = $_REQUEST['to'];
+  }
+  if (array_key_exists('network-code', $_REQUEST) && !empty($_REQUEST['network-code'])) 
+  {
+    $options['network-code'] = $_REQUEST['network-code'];
+  }
+  if (array_key_exists('price', $_REQUEST) && !empty($_REQUEST['price'])) 
+  {
+    $options['price'] = $_REQUEST['price'];
+  }
+  if (array_key_exists('messageId', $_REQUEST) && !empty($_REQUEST['messageId'])) 
+  {
+    $options['messageId'] = $_REQUEST['messageId'];
+  }
+  sms_receipt($number, $reference, $gateway_status, $options);
+  print "response 200 OK";
+}
+
+/**
+ * Returns custom additions to be added to the send forms.
+ */
+function mocean_send_form() {
+  $options = array(
+    "" => "- Select Country -",
+  ) + sms_country_codes();
+  $form['country'] = array(
+    '#type' => 'select',
+    '#title' => t('Country'),
+    '#multiple' => FALSE,
+    '#options' => $options,
+    '#default_value' => -1,
+    '#required' => TRUE,
+  );
+  return $form;
+}
+
+/**
+ * Converts a string to UCS-2 encoding if necessary.
+ */
+function mocean_unicode($message) {
+  if (function_exists('iconv')) {
+    $latin = @iconv('UTF-8', 'ISO-8859-1', $message);
+    if (strcmp($latin, $message)) {
+      $arr = unpack('H*hex', @iconv('UTF-8', 'UCS-2BE', $message));
+      return strtoupper($arr['hex']) . '&unicode=1';
+    }
+  }
+  return FALSE;
+}
